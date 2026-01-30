@@ -76,16 +76,16 @@ def call_network_comments_api(task, workflow_id, data):
     total_pages = data["total_pages"]
     if current_page < total_pages:
         # create a new task with page = current_page + 1
-        publish_new_task_delay(current_page, task, total_pages, workflow_id)
+        publish_new_task_delay(task, current_page, total_pages, workflow_id)
     return {"result": f"page {current_page}"}
 
-def publish_new_task_delay(current_page, task, total_pages, workflow_id):
+def publish_new_task_delay(task, current_page, total_pages, workflow_id):
     capture_post_comments.delay(workflow_id, {
         "page": current_page + 1,
         "total_pages": total_pages,
     })
 
-def publish_new_task_chord(current_page, task, total_pages, workflow_id):
+def publish_new_task_chord(task, current_page, total_pages, workflow_id):
     task.add_to_chord(
         capture_post_comments.s(workflow_id, {
             "page": current_page + 1,
