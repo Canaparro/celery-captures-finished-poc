@@ -1,5 +1,6 @@
 import json
 import pika
+from outbox.redis_counter import add_task_completed
 
 # RabbitMQ configuration
 RABBITMQ_HOST = 'localhost'
@@ -17,6 +18,20 @@ def callback(ch, method, properties, body):
         print("Received result:")
         print(json.dumps(result, indent=2))
         print("=" * 60)
+
+        # Extract fields from result
+        workflow_id = result.get('workflow_id')
+        task_id = result.get('task_id')
+        status = result.get('status')
+
+        # Add task to completed set for success or permanent failure
+        if status in ['success', 'permanent_failure']:
+            is_complete = add_task_completed(workflow_id, task_id)
+
+            if is_complete:
+                print("=" * 60)
+                print(f"WORKFLOW {workflow_id} COMPLETE!")
+                print("=" * 60)
 
         # Acknowledge the message
         ch.basic_ack(delivery_tag=method.delivery_tag)
