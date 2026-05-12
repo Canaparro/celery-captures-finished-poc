@@ -5,7 +5,7 @@ from datetime import datetime
 from time import sleep
 
 import pika
-from celery import Celery, Task
+from celery import Celery
 
 from exceptions import PermanentFailureException, TransientFailureException
 from models import Record
@@ -63,7 +63,7 @@ RESULTS_QUEUE = 'task_results'
 
 
 def publish_result_to_queue(workflow_id: str, task_id: str, status: str, message: str):
-    """Publish task result to RabbitMQ queue
+    """Publish task result to RabbitMQ queue with retry logic
 
     Args:
         workflow_id: The workflow ID
@@ -79,92 +79,109 @@ def publish_result_to_queue(workflow_id: str, task_id: str, status: str, message
         'timestamp': datetime.now().isoformat()
     }
 
-    credentials = pika.PlainCredentials(RABBITMQ_USER, RABBITMQ_PASSWORD)
-    parameters = pika.ConnectionParameters(
-        host=RABBITMQ_HOST,
-        port=RABBITMQ_PORT,
-        credentials=credentials
-    )
+    max_attempts = 3
+    retry_delay = 1
 
-    connection = pika.BlockingConnection(parameters)
-    channel = connection.channel()
-
-    # Declare the results queue
-    channel.queue_declare(queue=RESULTS_QUEUE, durable=True)
-
-    # Publish the result
-    channel.basic_publish(
-        exchange='',
-        routing_key=RESULTS_QUEUE,
-        body=json.dumps(result),
-        properties=pika.BasicProperties(
-            delivery_mode=2,  # Make message persistent
-            content_type='application/json'
-        )
-    )
-
-    connection.close()
-    print(f"Published result to queue: {result}")
-
-
-class CustomTask(Task):
-    """Custom task class with on_success and on_failure callbacks"""
-
-    def run(self, **kwargs):
-        print("test")
-        super().run(**kwargs)
-
-    def on_success(self, retval, task_id, args, kwargs):
-        workflow_id = args[0]
-        record = Record.model_validate(args[1])
-
-        publish_result_to_queue(
-            workflow_id=workflow_id,
-            task_id=task_id,
-            status='success',
-            message=f"Processed record {record.record_id}"
-        )
-
-    def on_failure(self, exc, task_id, args, kwargs, einfo):
-        workflow_id = args[0]
-        record = Record.model_validate(args[1])
-
-        if isinstance(exc, PermanentFailureException):
-            publish_result_to_queue(
-                workflow_id=workflow_id,
-                task_id=task_id,
-                status='permanent_failure',
-                message=f"Permanent failure processing record {record.record_id}"
+    for attempt in range(max_attempts):
+        try:
+            credentials = pika.PlainCredentials(RABBITMQ_USER, RABBITMQ_PASSWORD)
+            parameters = pika.ConnectionParameters(
+                host=RABBITMQ_HOST,
+                port=RABBITMQ_PORT,
+                credentials=credentials
             )
 
-        elif isinstance(exc, TransientFailureException):
-            # Transient failure - retry
-            publish_result_to_queue(
-                workflow_id=workflow_id,
-                task_id=task_id,
-                status='transient_failure',
-                message=f"Transient failure processing record {record.record_id}"
+            connection = pika.BlockingConnection(parameters)
+            channel = connection.channel()
+
+            # Declare the results queue
+            channel.queue_declare(queue=RESULTS_QUEUE, durable=True)
+
+            # Publish the result
+            channel.basic_publish(
+                exchange='',
+                routing_key=RESULTS_QUEUE,
+                body=json.dumps(result),
+                properties=pika.BasicProperties(
+                    delivery_mode=2,  # Make message persistent
+                    content_type='application/json'
+                )
             )
-            self.retry(countdown=2, max_retries=3)
+
+            connection.close()
+            print(f"Published result to queue: {result}")
+            return  # Success, exit function
+
+        except Exception as e:
+            print(f"Failed to publish result (attempt {attempt + 1}/{max_attempts}): {e}")
+            if attempt < max_attempts - 1:
+                sleep(retry_delay)
+            else:
+                # All attempts failed, re-raise the exception
+                raise
 
 
-@app.task(bind=True, base=CustomTask)
+@app.task(bind=True)
 def process_record(self, workflow_id: str, record_as_dict: dict):
     """
     Simulates processing a record by calling an external API,
     processing its children, and publishing the result to a queue.
     """
     record = Record.model_validate(record_as_dict)
-    if record.permanent_failure:
-        raise PermanentFailureException
+    max_retries = 3
+    retry_delay = 2
 
-    if record.transient_failure:
-        retry_count = self.request.retries
-        if retry_count < 2:
-            raise TransientFailureException
+    for attempt in range(max_retries):
+        try:
+            if record.permanent_failure:
+                raise PermanentFailureException
 
-    records = call_external_api(record)
-    process_children(self, workflow_id, records)
+            if record.transient_failure:
+                if attempt < 2:
+                    raise TransientFailureException
+
+            records = call_external_api(record)
+            process_children(self, workflow_id, records)
+
+            # Publish success result - if this fails, will retry
+            publish_result_to_queue(
+                workflow_id=workflow_id,
+                task_id=self.request.id,
+                status='success',
+                message=f"Processed record {record.record_id}"
+            )
+            return  # Success, exit task
+
+        except PermanentFailureException:
+            # Publish permanent failure - if this fails, will retry
+            publish_result_to_queue(
+                workflow_id=workflow_id,
+                task_id=self.request.id,
+                status='permanent_failure',
+                message=f"Permanent failure processing record {record.record_id}"
+            )
+            return  # Task completes (not retried)
+
+        except TransientFailureException:
+            # Publish transient failure message
+            publish_result_to_queue(
+                workflow_id=workflow_id,
+                task_id=self.request.id,
+                status='transient_failure',
+                message=f"Transient failure processing record {record.record_id}, attempt {attempt + 1}/{max_retries}"
+            )
+
+            if attempt < max_retries - 1:
+                sleep(retry_delay)
+            else:
+                # Retries exhausted - publish final message
+                publish_result_to_queue(
+                    workflow_id=workflow_id,
+                    task_id=self.request.id,
+                    status='transient_failure_exhausted',
+                    message=f"Transient failure processing record {record.record_id} - retries exhausted"
+                )
+                return  # Task completes (retries exhausted)
 
 def call_external_api(record: Record):
     """Simulate an external API call that processes the record."""

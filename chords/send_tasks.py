@@ -25,7 +25,7 @@ def main():
             ),
             Record(
                 record_id=2,
-                # transient_failure=True,
+                transient_failure=True,
             )
         ],
     )

@@ -24,8 +24,8 @@ def callback(ch, method, properties, body):
         task_id = result.get('task_id')
         status = result.get('status')
 
-        # Add task to completed set for success or permanent failure
-        if status in ['success', 'permanent_failure']:
+        # Add task to completed set for success, permanent failure, or exhausted retries
+        if status in ['success', 'permanent_failure', 'transient_failure_exhausted']:
             is_complete = add_task_completed(workflow_id, task_id)
 
             if is_complete:
