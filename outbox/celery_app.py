@@ -1,7 +1,7 @@
 import json
 import logging
 import hashlib
-from datetime import datetime
+from datetime import datetime, timezone
 from time import sleep
 
 import pika
@@ -9,7 +9,7 @@ from celery import Celery
 
 from exceptions import PermanentFailureException, TransientFailureException
 from models import Record
-from outbox.redis_counter import add_task_created
+from outbox.redis_counter import add_task_created, redis_client
 
 # Suppress pika logs
 logging.getLogger('pika').setLevel(logging.WARNING)
@@ -62,21 +62,28 @@ RABBITMQ_PASSWORD = 'guest'
 RESULTS_QUEUE = 'task_results'
 
 
-def publish_result_to_queue(workflow_id: str, task_id: str, status: str, message: str):
-    """Publish task result to RabbitMQ queue with retry logic
-
-    Args:
-        workflow_id: The workflow ID
-        task_id: The task ID
-        status: Status of the task (success, failure, workflow_complete)
-        message: Human-readable message
-    """
+def publish_result_to_queue(
+    workflow_id: str,
+    task_id: str,
+    status: str,
+    message: str,
+    *,
+    parent_task_id: str | None,
+    record_id: int,
+    attempt: int,
+    first_seen_at: str,
+):
+    """Publish task result to RabbitMQ queue with retry logic."""
     result = {
         'workflow_id': workflow_id,
         'task_id': task_id,
+        'parent_task_id': parent_task_id,
+        'record_id': record_id,
         'status': status,
         'message': message,
-        'timestamp': datetime.now().isoformat()
+        'attempt': attempt,
+        'first_seen_at': first_seen_at,
+        'timestamp': datetime.now(timezone.utc).isoformat(),
     }
 
     max_attempts = 3
@@ -121,8 +128,22 @@ def publish_result_to_queue(workflow_id: str, task_id: str, status: str, message
                 raise
 
 
+def _capture_first_seen_at(task_id: str) -> str:
+    """Return the stable first-receive timestamp for this task_id.
+
+    Uses Redis SETNX so the anchor survives in-process retries (and any future
+    cross-invocation retry mechanism). 24h TTL so stale keys don't accumulate.
+    """
+    key = f"task:{task_id}:first_seen_at"
+    now_iso = datetime.now(timezone.utc).isoformat()
+    if redis_client.set(key, now_iso, nx=True, ex=86400):
+        return now_iso
+    existing = redis_client.get(key)
+    return existing or now_iso
+
+
 @app.task(bind=True)
-def process_record(self, workflow_id: str, record_as_dict: dict):
+def process_record(self, workflow_id: str, record_as_dict: dict, parent_task_id: str | None = None):
     """
     Simulates processing a record by calling an external API,
     processing its children, and publishing the result to a queue.
@@ -130,58 +151,62 @@ def process_record(self, workflow_id: str, record_as_dict: dict):
     record = Record.model_validate(record_as_dict)
     max_retries = 3
     retry_delay = 2
+    first_seen_at = _capture_first_seen_at(self.request.id)
+
+    common = {
+        'workflow_id': workflow_id,
+        'task_id': self.request.id,
+        'parent_task_id': parent_task_id,
+        'record_id': record.record_id,
+        'first_seen_at': first_seen_at,
+    }
 
     for attempt in range(max_retries):
         try:
             if record.permanent_failure:
                 raise PermanentFailureException
 
-            if record.transient_failure:
-                if attempt < 2:
-                    raise TransientFailureException
+            if record.transient_failure and attempt < 2:
+                raise TransientFailureException
 
             records = call_external_api(record)
             process_children(self, workflow_id, records)
 
-            # Publish success result - if this fails, will retry
             publish_result_to_queue(
-                workflow_id=workflow_id,
-                task_id=self.request.id,
+                **common,
                 status='success',
-                message=f"Processed record {record.record_id}"
+                message=f"Processed record {record.record_id}",
+                attempt=attempt,
             )
-            return  # Success, exit task
+            return
 
         except PermanentFailureException:
-            # Publish permanent failure - if this fails, will retry
             publish_result_to_queue(
-                workflow_id=workflow_id,
-                task_id=self.request.id,
+                **common,
                 status='permanent_failure',
-                message=f"Permanent failure processing record {record.record_id}"
+                message=f"Permanent failure processing record {record.record_id}",
+                attempt=attempt,
             )
-            return  # Task completes (not retried)
+            return
 
         except TransientFailureException:
-            # Publish transient failure message
             publish_result_to_queue(
-                workflow_id=workflow_id,
-                task_id=self.request.id,
+                **common,
                 status='transient_failure',
-                message=f"Transient failure processing record {record.record_id}, attempt {attempt + 1}/{max_retries}"
+                message=f"Transient failure processing record {record.record_id}, attempt {attempt + 1}/{max_retries}",
+                attempt=attempt,
             )
 
             if attempt < max_retries - 1:
                 sleep(retry_delay)
             else:
-                # Retries exhausted - publish final message
                 publish_result_to_queue(
-                    workflow_id=workflow_id,
-                    task_id=self.request.id,
+                    **common,
                     status='transient_failure_exhausted',
-                    message=f"Transient failure processing record {record.record_id} - retries exhausted"
+                    message=f"Transient failure processing record {record.record_id} - retries exhausted",
+                    attempt=attempt,
                 )
-                return  # Task completes (retries exhausted)
+                return
 
 def call_external_api(record: Record):
     """Simulate an external API call that processes the record."""
@@ -200,5 +225,6 @@ def process_children(task, workflow_id: str, records: list[Record]):
 
         process_record.apply_async(
             args=[workflow_id, child_record.model_dump()],
+            kwargs={'parent_task_id': task.request.id},
             task_id=task_id
         )

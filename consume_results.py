@@ -1,6 +1,10 @@
 import json
+from datetime import datetime
+
 import pika
-from outbox.redis_counter import add_task_completed
+from psycopg_pool import ConnectionPool
+
+from outbox.redis_counter import add_task_completed, redis_client
 
 # RabbitMQ configuration
 RABBITMQ_HOST = 'localhost'
@@ -9,9 +13,75 @@ RABBITMQ_USER = 'guest'
 RABBITMQ_PASSWORD = 'guest'
 RESULTS_QUEUE = 'task_results'
 
+# Postgres configuration
+PG_CONNINFO = "postgresql://celery:celery@localhost:5442/celery_viewer"
+PG_POOL = ConnectionPool(
+    conninfo=PG_CONNINFO,
+    min_size=1,
+    max_size=4,
+    kwargs={"autocommit": True},
+    open=False,
+)
+
+TERMINAL = {'success', 'permanent_failure', 'transient_failure_exhausted'}
+
+UPSERT_SQL = """
+INSERT INTO tasks (task_id, workflow_id, parent_task_id, record_id,
+                   final_status, last_message, metrics)
+VALUES (%(task_id)s, %(workflow_id)s, %(parent_task_id)s, %(record_id)s,
+        %(final_status)s, %(last_message)s, %(metrics)s)
+ON CONFLICT (task_id) DO UPDATE SET
+    final_status   = EXCLUDED.final_status,
+    last_message   = EXCLUDED.last_message,
+    metrics        = EXCLUDED.metrics,
+    parent_task_id = EXCLUDED.parent_task_id,
+    record_id      = EXCLUDED.record_id;
+"""
+
+
+def _build_metrics(result: dict) -> dict:
+    first_seen_at = result.get('first_seen_at')
+    finished_at = result.get('timestamp')
+    total_ms = None
+    try:
+        if first_seen_at and finished_at:
+            fs = datetime.fromisoformat(first_seen_at)
+            fn = datetime.fromisoformat(finished_at)
+            total_ms = int((fn - fs).total_seconds() * 1000)
+    except ValueError:
+        total_ms = None
+    return {
+        'retry_count': result.get('attempt', 0),
+        'total_duration_ms': total_ms,
+        'first_seen_at': first_seen_at,
+        'finished_at': finished_at,
+    }
+
+
+def _persist_terminal(result: dict) -> bool:
+    """UPSERT one terminal event. Returns False if the payload is malformed
+    (missing required fields) — caller should ack-and-skip rather than requeue,
+    since the payload will never succeed on retry."""
+    if 'record_id' not in result or 'task_id' not in result or 'workflow_id' not in result:
+        print(f"Skipping malformed payload (missing required fields): {result}")
+        return False
+    metrics = _build_metrics(result)
+    params = {
+        'task_id': result['task_id'],
+        'workflow_id': result['workflow_id'],
+        'parent_task_id': result.get('parent_task_id'),
+        'record_id': result['record_id'],
+        'final_status': result['status'],
+        'last_message': result.get('message'),
+        'metrics': json.dumps(metrics),
+    }
+    with PG_POOL.connection() as conn, conn.cursor() as cur:
+        cur.execute(UPSERT_SQL, params)
+    redis_client.delete(f"task:{result['task_id']}:first_seen_at")
+    return True
+
 
 def callback(ch, method, properties, body):
-    """Callback function to process messages from the queue"""
     try:
         result = json.loads(body)
         print("=" * 60)
@@ -19,57 +89,56 @@ def callback(ch, method, properties, body):
         print(json.dumps(result, indent=2))
         print("=" * 60)
 
-        # Extract fields from result
         workflow_id = result.get('workflow_id')
         task_id = result.get('task_id')
         status = result.get('status')
 
-        # Add task to completed set for success, permanent failure, or exhausted retries
-        if status in ['success', 'permanent_failure', 'transient_failure_exhausted']:
-            is_complete = add_task_completed(workflow_id, task_id)
+        if status in TERMINAL:
+            try:
+                persisted = _persist_terminal(result)
+            except Exception as e:
+                # Real Postgres error (connection/constraint) — requeue.
+                print(f"Postgres persist failed for {task_id}: {e}")
+                ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
+                return
 
-            if is_complete:
-                print("=" * 60)
-                print(f"WORKFLOW {workflow_id} COMPLETE!")
-                print("=" * 60)
+            if persisted and workflow_id and task_id:
+                is_complete = add_task_completed(workflow_id, task_id)
+                if is_complete:
+                    print("=" * 60)
+                    print(f"WORKFLOW {workflow_id} COMPLETE!")
+                    print("=" * 60)
 
-        # Acknowledge the message
         ch.basic_ack(delivery_tag=method.delivery_tag)
     except Exception as e:
         print(f"Error processing message: {e}")
-        # Negative acknowledgement - message will be requeued
         ch.basic_nack(delivery_tag=method.delivery_tag)
 
 
 def main():
-    """Start consuming messages from the results queue"""
     print("Starting result consumer...")
     print(f"Connecting to RabbitMQ at {RABBITMQ_HOST}:{RABBITMQ_PORT}")
+    PG_POOL.open()
+    PG_POOL.wait()
+    print(f"Connected to Postgres at {PG_CONNINFO}")
 
-    # Set up connection
     credentials = pika.PlainCredentials(RABBITMQ_USER, RABBITMQ_PASSWORD)
     parameters = pika.ConnectionParameters(
         host=RABBITMQ_HOST,
         port=RABBITMQ_PORT,
         credentials=credentials,
         heartbeat=600,
-        blocked_connection_timeout=300
+        blocked_connection_timeout=300,
     )
 
     connection = pika.BlockingConnection(parameters)
     channel = connection.channel()
-
-    # Declare the queue (idempotent - will not create if exists)
     channel.queue_declare(queue=RESULTS_QUEUE, durable=True)
-
-    # Set prefetch count to 1 to distribute work evenly
     channel.basic_qos(prefetch_count=1)
-
-    # Start consuming
     channel.basic_consume(
         queue=RESULTS_QUEUE,
         on_message_callback=callback,
-        auto_ack=False  # Manual acknowledgement
+        auto_ack=False,
     )
 
     print(f"Waiting for results from queue '{RESULTS_QUEUE}'...")
@@ -81,6 +150,7 @@ def main():
         print("\nStopping consumer...")
         channel.stop_consuming()
         connection.close()
+        PG_POOL.close()
         print("Consumer stopped.")
 
 
