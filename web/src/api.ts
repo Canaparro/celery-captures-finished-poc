@@ -35,3 +35,19 @@ export async function fetchHighlights(
   const data = await json<{ task_ids: string[] }>(res);
   return data.task_ids;
 }
+
+export type WorkflowRunStatus = 'pending' | 'complete' | 'unknown';
+
+export interface WorkflowStatus {
+  workflow_id: string;
+  status: WorkflowRunStatus;
+  created: number;
+  completed: number;
+  pending: number;
+}
+
+export async function fetchWorkflowStatus(
+  workflowId: string,
+): Promise<WorkflowStatus> {
+  return json(await fetch(`/api/workflows/${workflowId}/status`));
+}

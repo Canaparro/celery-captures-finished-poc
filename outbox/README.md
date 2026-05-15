@@ -56,29 +56,23 @@ poetry run python consume_results.py
 poetry run python -m outbox.send_tasks
 ```
 
-### Tuning the workflow
+### Workflow shape
 
-`send_tasks` generates a random tree. All knobs are optional:
+`send_tasks` builds a fixed three-section profile workflow. No CLI flags.
 
-| Flag                          | Default | What it does                                               |
-| ----------------------------- | ------- | ---------------------------------------------------------- |
-| `--count N`                   | `5`     | Total tasks in the tree                                    |
-| `--seed N`                    | random  | RNG seed — same seed + args ⇒ identical tree               |
-| `--max-children N`            | `4`     | Max children per node (controls depth vs. breadth)         |
-| `--transient-failure-rate F`  | `0.15`  | P(node is marked `transient_failure`) — retries 2× then OK |
-| `--permanent-failure-rate F`  | `0.05`  | P(node is marked `permanent_failure`) — fails immediately  |
-
-Examples:
-
-```bash
-# wide, shallow, mostly clean
-poetry run python -m outbox.send_tasks --count 12 --max-children 6 \
-  --transient-failure-rate 0.05 --permanent-failure-rate 0
-
-# deep chain with lots of retries, reproducible
-poetry run python -m outbox.send_tasks --count 20 --max-children 2 \
-  --transient-failure-rate 0.4 --seed 42
 ```
+workflow
+└── start
+    ├── timeline ── page 1 → page 2 → page 3 → page 4 (✖ permanent) → page 5 [never runs]
+    ├── album    ── page 1 → page 2 (⟲ transient, succeeds) → page 3
+    └── videos   ── page 1
+```
+
+- Each section's pages form a **chain**: each page spawns the next. If a page fails permanently, the rest of the chain never runs.
+- Two failures are hardcoded into the shape so the viewer's `⚠ failure downstream` and retry visualizations stay exercised:
+  - `timeline / page 4` → `permanent_failure`
+  - `album / page 2` → `transient_failure` (retries twice, then succeeds)
+- Counts (5 / 3 / 1) and the failure cells are constants in `outbox/send_tasks.py`. Edit them there to change the shape.
 
 ## Inspecting live state in Redis
 

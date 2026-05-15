@@ -38,10 +38,38 @@ def current_workflow():
     return {"workflow_id": wf}
 
 
+@app.get("/api/workflows/{workflow_id}/status")
+def workflow_status(workflow_id: str):
+    """Pulls status from the workflows table, populated by consume_results.py.
+    Returns 'unknown' if no row exists yet (e.g. consumer hasn't seen the first
+    terminal event)."""
+    sql = """
+        SELECT w.status, w.started_at, w.finished_at,
+               (SELECT count(*) FROM tasks WHERE workflow_id = %s) AS persisted_tasks
+        FROM workflows w
+        WHERE w.workflow_id = %s
+    """
+    with PG_POOL.connection() as conn, conn.cursor() as cur:
+        cur.execute(sql, (workflow_id, workflow_id))
+        row = cur.fetchone()
+        if not row:
+            return {
+                "workflow_id": workflow_id,
+                "status": "unknown",
+                "started_at": None,
+                "finished_at": None,
+                "persisted_tasks": 0,
+            }
+        cols = [c.name for c in cur.description]
+        data = dict(zip(cols, row))
+        data["workflow_id"] = workflow_id
+        return data
+
+
 @app.get("/api/workflows/{workflow_id}/tasks")
 def list_tasks(workflow_id: str):
     sql = """
-        SELECT task_id, parent_task_id, record_id, final_status, metrics
+        SELECT task_id, parent_task_id, record_id, label, final_status, metrics
         FROM tasks
         WHERE workflow_id = %s
         ORDER BY created_at
@@ -54,7 +82,7 @@ def list_tasks(workflow_id: str):
 @app.get("/api/workflows/{workflow_id}/tasks/{task_id}")
 def get_task(workflow_id: str, task_id: str):
     sql = """
-        SELECT task_id, parent_task_id, record_id, final_status,
+        SELECT task_id, parent_task_id, record_id, label, final_status,
                last_message, metrics, created_at, updated_at
         FROM tasks
         WHERE workflow_id = %s AND task_id = %s

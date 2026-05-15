@@ -70,6 +70,7 @@ def publish_result_to_queue(
     *,
     parent_task_id: str | None,
     record_id: int,
+    label: str | None,
     attempt: int,
     first_seen_at: str,
 ):
@@ -79,6 +80,7 @@ def publish_result_to_queue(
         'task_id': task_id,
         'parent_task_id': parent_task_id,
         'record_id': record_id,
+        'label': label,
         'status': status,
         'message': message,
         'attempt': attempt,
@@ -158,6 +160,7 @@ def process_record(self, workflow_id: str, record_as_dict: dict, parent_task_id:
         'task_id': self.request.id,
         'parent_task_id': parent_task_id,
         'record_id': record.record_id,
+        'label': record.label,
         'first_seen_at': first_seen_at,
     }
 

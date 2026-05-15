@@ -28,7 +28,7 @@ export function DetailPanel({ task, onClose }: Props) {
     >
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <h2 style={{ margin: 0, fontSize: 16 }}>
-          record #{task.record_id} — {task.final_status}
+          {task.label ?? `record #${task.record_id}`} — {task.final_status}
         </h2>
         <button
           onClick={onClose}
@@ -63,6 +63,7 @@ export function DetailPanel({ task, onClose }: Props) {
 
       <h3 style={{ marginTop: 16, marginBottom: 4, fontSize: 13, color: '#aaa' }}>Identifiers</h3>
       <div style={{ fontFamily: 'monospace', fontSize: 11, wordBreak: 'break-all' }}>
+        <div>record_id: {task.record_id}</div>
         <div>task_id: {task.task_id}</div>
         <div>parent_task_id: {task.parent_task_id ?? '(root)'}</div>
       </div>

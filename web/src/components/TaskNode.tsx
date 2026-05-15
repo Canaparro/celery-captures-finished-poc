@@ -5,6 +5,7 @@ import type { FinalStatus, TaskMetrics } from '../types';
 export interface TaskNodeData {
   task_id: string;
   record_id: number;
+  label: string | null;
   final_status: FinalStatus;
   metrics: TaskMetrics;
   highlighted: boolean;
@@ -50,7 +51,9 @@ export function TaskNode({ data }: NodeProps) {
     >
       <Handle type="target" position={Position.Top} style={{ background: '#555' }} />
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <span style={{ fontSize: 18, fontWeight: 600 }}>record #{d.record_id}</span>
+        <span style={{ fontSize: 18, fontWeight: 600 }}>
+          {d.label ?? `record #${d.record_id}`}
+        </span>
         {d.hasChildren && (
           <span style={{ fontSize: 12, opacity: 0.8 }}>
             {d.collapsed ? '▸ expand' : '▾ collapse'}

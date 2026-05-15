@@ -26,16 +26,32 @@ PG_POOL = ConnectionPool(
 TERMINAL = {'success', 'permanent_failure', 'transient_failure_exhausted'}
 
 UPSERT_SQL = """
-INSERT INTO tasks (task_id, workflow_id, parent_task_id, record_id,
+INSERT INTO tasks (task_id, workflow_id, parent_task_id, record_id, label,
                    final_status, last_message, metrics)
-VALUES (%(task_id)s, %(workflow_id)s, %(parent_task_id)s, %(record_id)s,
+VALUES (%(task_id)s, %(workflow_id)s, %(parent_task_id)s, %(record_id)s, %(label)s,
         %(final_status)s, %(last_message)s, %(metrics)s)
 ON CONFLICT (task_id) DO UPDATE SET
     final_status   = EXCLUDED.final_status,
     last_message   = EXCLUDED.last_message,
     metrics        = EXCLUDED.metrics,
     parent_task_id = EXCLUDED.parent_task_id,
-    record_id      = EXCLUDED.record_id;
+    record_id      = EXCLUDED.record_id,
+    label          = EXCLUDED.label;
+"""
+
+# Insert a pending row on first sight of a workflow; do nothing if it already
+# exists (so we don't overwrite a 'complete' row with 'pending').
+ENSURE_WORKFLOW_SQL = """
+INSERT INTO workflows (workflow_id, status)
+VALUES (%(workflow_id)s, 'pending')
+ON CONFLICT (workflow_id) DO NOTHING;
+"""
+
+MARK_WORKFLOW_COMPLETE_SQL = """
+UPDATE workflows
+   SET status = 'complete', finished_at = now()
+ WHERE workflow_id = %(workflow_id)s
+   AND status <> 'complete';
 """
 
 
@@ -71,14 +87,21 @@ def _persist_terminal(result: dict) -> bool:
         'workflow_id': result['workflow_id'],
         'parent_task_id': result.get('parent_task_id'),
         'record_id': result['record_id'],
+        'label': result.get('label'),
         'final_status': result['status'],
         'last_message': result.get('message'),
         'metrics': json.dumps(metrics),
     }
     with PG_POOL.connection() as conn, conn.cursor() as cur:
+        cur.execute(ENSURE_WORKFLOW_SQL, {'workflow_id': result['workflow_id']})
         cur.execute(UPSERT_SQL, params)
     redis_client.delete(f"task:{result['task_id']}:first_seen_at")
     return True
+
+
+def _mark_workflow_complete(workflow_id: str) -> None:
+    with PG_POOL.connection() as conn, conn.cursor() as cur:
+        cur.execute(MARK_WORKFLOW_COMPLETE_SQL, {'workflow_id': workflow_id})
 
 
 def callback(ch, method, properties, body):
@@ -105,6 +128,7 @@ def callback(ch, method, properties, body):
             if persisted and workflow_id and task_id:
                 is_complete = add_task_completed(workflow_id, task_id)
                 if is_complete:
+                    _mark_workflow_complete(workflow_id)
                     print("=" * 60)
                     print(f"WORKFLOW {workflow_id} COMPLETE!")
                     print("=" * 60)

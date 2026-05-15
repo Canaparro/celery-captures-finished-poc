@@ -1,8 +1,16 @@
+CREATE TABLE IF NOT EXISTS workflows (
+    workflow_id  TEXT PRIMARY KEY,
+    status       TEXT NOT NULL CHECK (status IN ('pending','complete')),
+    started_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    finished_at  TIMESTAMPTZ
+);
+
 CREATE TABLE IF NOT EXISTS tasks (
     task_id         TEXT PRIMARY KEY,
     workflow_id     TEXT NOT NULL,
     parent_task_id  TEXT,
     record_id       INTEGER NOT NULL,
+    label           TEXT,
     final_status    TEXT NOT NULL
                     CHECK (final_status IN ('success','permanent_failure','transient_failure_exhausted')),
     last_message    TEXT,

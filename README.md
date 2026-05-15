@@ -118,7 +118,7 @@ poetry run uvicorn viewer.api:app --host 127.0.0.1 --port 8000
 poetry run python -m outbox.send_tasks
 ```
 
-Then open **http://localhost:8000** in a browser. The default sample workflow contains 5 tasks; one deliberately retries twice before succeeding, so you can see retry counts and a slower duration on that node.
+Then open **http://localhost:8000** in a browser. The default workflow is a fixed three-section profile (`start → timeline / album / videos`, each with a chain of pages). Two pages have hardcoded failures — `album/page 2` retries twice and succeeds, `timeline/page 4` fails permanently — so the retry and downstream-failure UIs stay exercised. See `outbox/README.md` for the full shape.
 
 ## Using the viewer
 
@@ -148,7 +148,7 @@ docker exec -e PGPASSWORD=celery <postgres_container> \
     ORDER BY record_id;"
 ```
 
-Expected for the sample workflow: 5 rows, one `is_root = t`, `record_id=2` with `retries=2`.
+Expected for the default profile workflow: 12 rows. Every row has a non-null `parent_task_id` (the root task's parent is the workflow id). The `album/page 2` row has `retries=2`, the `timeline/page 4` row has `final_status = 'permanent_failure'`, and `timeline/page 5` is absent (its chain stopped at the failure).
 
 ## File layout
 

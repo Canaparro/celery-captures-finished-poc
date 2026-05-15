@@ -1,7 +1,8 @@
-import type { HighlightBy } from '../api';
+import type { HighlightBy, WorkflowStatus } from '../api';
 
 interface Props {
   workflowId: string | null;
+  status: WorkflowStatus | null;
   current: HighlightBy | null;
   onPick: (by: HighlightBy | null) => void;
 }
@@ -12,7 +13,57 @@ const OPTIONS: { key: HighlightBy; label: string }[] = [
   { key: 'failed', label: 'Failed' },
 ];
 
-export function HighlightBar({ workflowId, current, onPick }: Props) {
+function StatusPill({ status }: { status: WorkflowStatus | null }) {
+  if (!status) {
+    return (
+      <span style={pill({ bg: '#333', fg: '#888' })}>status: …</span>
+    );
+  }
+  if (status.status === 'pending') {
+    return (
+      <span
+        style={pill({ bg: '#fbc02d', fg: '#222' })}
+        title={`${status.completed}/${status.created} tasks complete`}
+      >
+        ⏳ pending · {status.completed}/{status.created}
+      </span>
+    );
+  }
+  if (status.status === 'complete') {
+    return (
+      <span
+        style={pill({ bg: '#2e7d32', fg: '#fff' })}
+        title={`${status.completed}/${status.created} tasks complete`}
+      >
+        ✓ complete · {status.completed}/{status.created}
+      </span>
+    );
+  }
+  return (
+    <span
+      style={pill({ bg: '#444', fg: '#aaa' })}
+      title="Workflow tracking not initialized in Redis"
+    >
+      ? unknown
+    </span>
+  );
+}
+
+function pill({ bg, fg }: { bg: string; fg: string }): React.CSSProperties {
+  return {
+    background: bg,
+    color: fg,
+    border: '1px solid rgba(0,0,0,0.25)',
+    borderRadius: 999,
+    padding: '3px 10px',
+    fontSize: 11,
+    fontWeight: 600,
+    letterSpacing: 0.3,
+    marginRight: 8,
+  };
+}
+
+export function HighlightBar({ workflowId, status, current, onPick }: Props) {
   return (
     <div
       style={{
@@ -34,6 +85,7 @@ export function HighlightBar({ workflowId, current, onPick }: Props) {
       }}
     >
       <strong style={{ marginRight: 8 }}>Celery task viewer</strong>
+      <StatusPill status={status} />
       <span style={{ color: '#888', fontSize: 11, marginRight: 16 }}>
         workflow: {workflowId ?? '—'}
       </span>

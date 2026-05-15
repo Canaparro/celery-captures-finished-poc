@@ -14,6 +14,7 @@ export interface TaskSummary {
   task_id: string;
   parent_task_id: string | null;
   record_id: number;
+  label: string | null;
   final_status: FinalStatus;
   metrics: TaskMetrics;
 }

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Background,
   Controls,
@@ -14,7 +14,9 @@ import {
   fetchHighlights,
   fetchTaskDetail,
   fetchTasks,
+  fetchWorkflowStatus,
   type HighlightBy,
+  type WorkflowStatus,
 } from './api';
 import { layoutTree } from './layout';
 import { TaskNode, type TaskNodeData } from './components/TaskNode';
@@ -121,6 +123,7 @@ function buildGraph(
       data: {
         task_id: t.task_id,
         record_id: t.record_id,
+        label: t.label,
         final_status: t.final_status,
         metrics: t.metrics,
         highlighted: false,
@@ -194,6 +197,9 @@ export function App() {
   const [selected, setSelected] = useState<TaskDetail | null>(null);
   const [highlightBy, setHighlightBy] = useState<HighlightBy | null>(null);
   const [highlightIds, setHighlightIds] = useState<Set<string>>(new Set());
+  const [status, setStatus] = useState<WorkflowStatus | null>(null);
+  const statusRef = useRef<WorkflowStatus | null>(null);
+  statusRef.current = status;
 
   useEffect(() => {
     fetchCurrentWorkflow()
@@ -203,13 +209,52 @@ export function App() {
 
   useEffect(() => {
     if (!workflowId) return;
-    fetchTasks(workflowId)
-      .then((ts) => {
+    let cancelled = false;
+    const seen = new Set<string>();
+
+    async function tick() {
+      if (cancelled || !workflowId) return;
+      try {
+        const [ts, st] = await Promise.all([
+          fetchTasks(workflowId),
+          fetchWorkflowStatus(workflowId),
+        ]);
+        if (cancelled) return;
         setTasks(ts);
-        // Start with workflow expanded, every task collapsed.
-        setCollapsed(new Set(ts.map((t) => t.task_id)));
-      })
-      .catch((e) => setError(String(e)));
+        setStatus(st);
+
+        // Default any newly-seen task to collapsed; leave everything else
+        // (including tasks the user has explicitly expanded) alone.
+        const newlySeen: string[] = [];
+        for (const t of ts) {
+          if (!seen.has(t.task_id)) {
+            seen.add(t.task_id);
+            newlySeen.push(t.task_id);
+          }
+        }
+        if (newlySeen.length > 0) {
+          setCollapsed((prev) => {
+            const next = new Set(prev);
+            for (const id of newlySeen) next.add(id);
+            return next;
+          });
+        }
+      } catch (e) {
+        if (!cancelled) setError(String(e));
+      }
+    }
+
+    tick();
+    const id = setInterval(() => {
+      if (cancelled) return;
+      if (statusRef.current?.status === 'complete') return;
+      tick();
+    }, 2000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
   }, [workflowId]);
 
   const base = useMemo(
@@ -357,7 +402,12 @@ export function App() {
 
   return (
     <div style={{ position: 'fixed', inset: 0, paddingTop: 48 }}>
-      <HighlightBar workflowId={workflowId} current={highlightBy} onPick={onPickHighlight} />
+      <HighlightBar
+        workflowId={workflowId}
+        status={status}
+        current={highlightBy}
+        onPick={onPickHighlight}
+      />
       {tasks.length === 0 ? (
         <div style={{ padding: 64, fontFamily: 'system-ui' }}>
           Workflow <code>{workflowId}</code> has no persisted tasks yet.
