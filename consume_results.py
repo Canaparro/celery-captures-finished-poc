@@ -2,8 +2,8 @@ import json
 from datetime import datetime
 
 import pika
-from psycopg_pool import ConnectionPool
 
+from db import PG_CONNINFO, PG_POOL
 from outbox.redis_counter import add_task_completed, redis_client
 
 # RabbitMQ configuration
@@ -12,16 +12,6 @@ RABBITMQ_PORT = 5682
 RABBITMQ_USER = 'guest'
 RABBITMQ_PASSWORD = 'guest'
 RESULTS_QUEUE = 'task_results'
-
-# Postgres configuration
-PG_CONNINFO = "postgresql://celery:celery@localhost:5442/celery_viewer"
-PG_POOL = ConnectionPool(
-    conninfo=PG_CONNINFO,
-    min_size=1,
-    max_size=4,
-    kwargs={"autocommit": True},
-    open=False,
-)
 
 TERMINAL = {'success', 'permanent_failure', 'transient_failure_exhausted'}
 

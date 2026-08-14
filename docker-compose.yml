@@ -1,12 +1,7 @@
-# NOTE: If you already have RabbitMQ/Redis/Postgres running (e.g. from your
-# integration_tests stack), skip this file — the app connects to:
-#   RabbitMQ localhost:5682, Redis localhost:6389, Postgres localhost:5442
-# regardless of how those services are started.
-#
-# If Postgres is running with a different database/user than `celery_viewer`/
-# `celery`, create them and apply ops/postgres/init.sql manually:
-#   createdb -h localhost -p 5442 -U <admin> celery_viewer
-#   psql -h localhost -p 5442 -U celery -d celery_viewer -f ops/postgres/init.sql
+# Postgres is NOT here on purpose: it is started per dev session by
+# ops/postgres/dev_db.py (testcontainers, random host port). This file only
+# provides the two long-lived brokers, on non-default ports:
+#   RabbitMQ localhost:5682, Redis localhost:6389
 
 services:
   rabbitmq:
@@ -19,18 +14,3 @@ services:
     image: redis:7
     ports:
       - "6389:6379"
-
-  postgres:
-    image: postgres:16
-    ports:
-      - "5442:5432"
-    environment:
-      POSTGRES_USER: celery
-      POSTGRES_PASSWORD: celery
-      POSTGRES_DB: celery_viewer
-    volumes:
-      - ./ops/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
-      - pgdata:/var/lib/postgresql/data
-
-volumes:
-  pgdata:

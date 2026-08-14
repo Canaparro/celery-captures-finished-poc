@@ -5,7 +5,7 @@ import redis
 from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 
-from viewer.db import PG_POOL
+from db import PG_POOL
 
 REDIS_HOST = "localhost"
 REDIS_PORT = 6389
